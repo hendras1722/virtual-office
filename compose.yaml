@@ -1,0 +1,16 @@
+services:
+  ruang-ai:
+    image: ${IMAGE:-ruang-ai:local}
+    build: .
+    restart: unless-stopped
+    # Loopback only: the app has no login. Reach it remotely via `ssh -L 29417:127.0.0.1:29417 user@host`.
+    ports:
+      - "127.0.0.1:29417:29417"
+    volumes:
+      - ruang-ai-data:/app/data
+    env_file:
+      - path: .env
+        required: false
+
+volumes:
+  ruang-ai-data:
