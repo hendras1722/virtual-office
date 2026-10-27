@@ -321,7 +321,7 @@ test('should send a calm idle character to the pantry and seat it again at its o
       office.updateMovement(1 / 30, false)
       const walker = scene.getObjectByName('walking-agent')
       if (!walker) continue
-      nearest = Math.min(nearest, Math.hypot(walker.position.x + 7.95, walker.position.z + 6.22))
+      nearest = Math.min(nearest, Math.hypot(walker.position.x + 7.95, walker.position.z - 4.78))
       westmost = Math.min(westmost, walker.position.x)
       expect(seat.anchor.x).toBeCloseTo(walker.position.x)
     }
@@ -331,6 +331,36 @@ test('should send a calm idle character to the pantry and seat it again at its o
     expect(seat.occupant.visible).toBe(true)
     expect(scene.getObjectByName('walking-agent')).toBeUndefined()
     expect(seat.anchor.equals(anchor)).toBe(true)
+  } finally {
+    office.dispose()
+  }
+})
+
+test('should walk every seat to the coffee bar and back inside the room, including seats that face the room', () => {
+  const scene = new THREE.Scene()
+  const office = createOffice(scene, 24)
+  try {
+    expect(office.seats.some((seat) => Math.abs(seat.group.rotation.y - Math.PI) < 1e-6)).toBe(true)
+    for (const [index, seat] of office.seats.entries()) {
+      office.setAgent(seat, { ...agent, id: `router-${index}` })
+      const anchor = seat.anchor.clone()
+      expect(office.walkTo(seat, 'coffee')).toBe(true)
+      let reached = false
+      for (let frame = 0; seat.away && frame < 30 * 90; frame++) {
+        office.updateMovement(1 / 30, false)
+        const walker = scene.getObjectByName('walking-agent')
+        if (!walker) continue
+        expect(Math.abs(walker.position.x)).toBeLessThan(9)
+        expect(walker.position.z).toBeGreaterThan(office.bounds.minZ)
+        expect(walker.position.z).toBeLessThan(office.bounds.maxZ)
+        if (Math.hypot(walker.position.x + 8, walker.position.z - 4.78) < 0.05) reached = true
+      }
+      expect(reached).toBe(true)
+      expect(seat.away).toBeNull()
+      expect(seat.anchor.distanceTo(anchor)).toBeLessThan(1e-9)
+      office.setAgent(seat, undefined)
+      office.updateMovement(0, true)
+    }
   } finally {
     office.dispose()
   }
@@ -418,14 +448,14 @@ test('should seat at most two characters on the sofa and free a place when one l
     let both = false
     for (let frame = 0; frame < 30 * 60; frame++) {
       office.updateMovement(1 / 30, false)
-      const sitting = scene.children[0]!.children.filter((child) => child.name === 'walking-agent' && child.position.x > 7.4 && child.position.y < -0.1)
-      sitting.forEach((child) => seated.add(Math.round(child.position.z * 10)))
+      const sitting = scene.children[0]!.children.filter((child) => child.name === 'walking-agent' && child.position.z < -6.3 && child.position.y < -0.1)
+      sitting.forEach((child) => seated.add(Math.round(child.position.x * 10)))
       if (sitting.length === 2) both = true
       expect(sitting.length).toBeLessThanOrEqual(2)
     }
     expect(both).toBe(true)
-    expect([...seated].some((z) => Math.abs(z - 18) <= 1)).toBe(true)
-    expect([...seated].some((z) => Math.abs(z - 33) <= 1)).toBe(true)
+    expect([...seated].some((x) => Math.abs(x - 6.5) <= 1)).toBe(true)
+    expect([...seated].some((x) => Math.abs(x - 21.5) <= 1)).toBe(true)
     expect(office.seats[0]!.away).toBeNull()
     expect(office.seats[1]!.away).toBeNull()
     updateWorkstationStatus(office.seats[2]!, 'idle', false, null)
@@ -447,7 +477,7 @@ test('should lower the hips and bend the legs while sitting down on the sofa, th
     for (let frame = 0; frame < 30 * 60 && seat.away; frame++) {
       office.updateMovement(1 / 30, false)
       const figure = scene.children[0]!.children.find((child) => child.name === 'walking-agent')
-      if (!figure || figure.position.x < 6.8) continue
+      if (!figure || figure.position.z > -5.8) continue
       const body = figure.children[0]!
       heights.push(body.position.y + figure.position.y)
       bends.push((body.children.find((child) => child.rotation.x > 1) ? 1 : 0))
@@ -482,7 +512,7 @@ test('should let two characters browse the bookshelf with a book in hand and ref
     for (let frame = 0; frame < 30 * 60 && (office.seats[0]!.away || office.seats[1]!.away); frame++) {
       office.updateMovement(1 / 30, false)
       for (const figure of scene.children[0]!.children.filter((child) => child.name === 'walking-agent')) {
-        nearest = Math.min(nearest, Math.hypot(figure.position.x - 5.6, figure.position.z + 4.7))
+        nearest = Math.min(nearest, Math.hypot(figure.position.x + 2.65, figure.position.z + 6.2))
         const hand = figure.children[0]!.children.filter((child) => child.children.some((grandchild) => grandchild.visible && grandchild.children.length === 2 && (grandchild as THREE.Group).isGroup))
         if (hand.length) books++
       }
@@ -507,9 +537,9 @@ test('should stand up from the sofa and hurry back when work arrives mid-rest', 
     let frame = 0
     while (frame++ < 30 * 60) {
       office.updateMovement(1 / 30, false)
-      if (seat.anchor.x > 7.4) break
+      if (seat.anchor.z < -6.3) break
     }
-    expect(seat.anchor.x).toBeGreaterThan(7.4)
+    expect(seat.anchor.z).toBeLessThan(-6.3)
     updateWorkstationStatus(seat, 'running', false, 'urgent')
     steps(office, 25)
     expect(seat.away).toBeNull()
@@ -601,7 +631,7 @@ test('should take hot coffee to the sofa, sip it with the mug raised to the face
       if (!figure || !prop?.visible) continue
       expect(seat.cup.visible).toBe(false)
       if (prop.getObjectByName('steam')?.visible) mugSteaming = true
-      if (figure.position.x > 7.4) {
+      if (figure.position.z < -6.3) {
         const arm = figure.children[0]!.children.find((child) => child.children.includes(prop))!
         if (arm.rotation.x > 1.2) raised++
         else if (arm.rotation.x < 0.6) lowered++

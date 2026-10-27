@@ -3,12 +3,13 @@ import { DEFAULT_SEATS } from './types'
 import { characterKey, HAIR_COLORS, resolveCharacter, SKIN_TONES } from './character'
 import type { Agent, TaskStatus } from './types'
 
+// Warm pastel studio: blush walls, honey floor, lilac and mint accents, cherry blossoms outside.
 const palette = {
-  floor: '#dcbd94', plank: '#d2b186', edge: '#b99b74', grout: '#b8966c', wall: '#f2e7d4', trim: '#dcc9ad', wainscot: '#a9b99f',
-  oak: '#c89f73', oakLight: '#e3c59b', metal: '#e3e0d6', dark: '#49544f', screen: '#abc8bd',
-  green: '#68866c', leaf: '#648364', leafLight: '#93a580', pot: '#bd8065', cream: '#f8f3e9',
-  rug: '#e0b99a', sofa: '#9cae98', glass: '#c8dedb', sky: '#e8efdf', skin: '#e2b899',
-  idle: '#a0b2a4', running: '#dfa75e', completed: '#6e9d7b', failed: '#ce7869',
+  floor: '#dcb48a', plank: '#d2a97e', edge: '#b88f6b', grout: '#c19c76', wall: '#fbe9e4', trim: '#f0d2cc', wainscot: '#e6b9ca',
+  oak: '#d7ae85', oakLight: '#eed5b4', metal: '#ece8ef', dark: '#55505e', screen: '#b9d4f0',
+  green: '#68866c', leaf: '#6f9a6a', leafLight: '#9dbd85', pot: '#e9a89c', cream: '#fff8f2',
+  rug: '#f4cad2', sofa: '#efbcc7', glass: '#d8e7f2', sky: '#ffe0ea', skin: '#e2b899',
+  idle: '#b7b1c2', running: '#4fbf7f', completed: '#6fa4dc', failed: '#e27b7b',
 }
 
 export interface Workstation {
@@ -46,6 +47,11 @@ export interface Workstation {
   anchor: THREE.Vector3
   agentId: string | null
   status: TaskStatus | 'idle'
+  /** Local x of the side exit beside the chair, and the corridor (world z) it leads to. */
+  exit: number
+  aisle: number
+  /** 1 when the occupant sits with its back to the camera and must turn to show its face, 0 when it already faces the room. */
+  faceTurn: number
 }
 
 export interface OfficeModel {
@@ -55,9 +61,17 @@ export interface OfficeModel {
   walkTo: (seat: Workstation, destination: 'coffee' | 'water' | 'shelf' | 'sofa') => boolean
   dispose: () => void
   bounds: { minZ: number; maxZ: number }
+  /** Area signs shown as HTML overlays above these points. */
+  zones: { label: string; anchor: THREE.Vector3 }[]
 }
 
 const EYE_HEIGHT = 0.036
+// Shared layout: the two walking corridors, their crossings, the sofa seat line and how far the coffee bar moved south.
+const NORTH = -3.0
+const SOUTH = 1.95
+const CONNECTORS = [-3.4, 4.3]
+const SOFA_SEAT_Z = -6.6
+const PANTRY_SHIFT = 11
 
 function applyAppearance(seat: Workstation, agent: Agent): void {
   const look = resolveCharacter(agent)
@@ -114,11 +128,11 @@ export function updateWorkstationAnimation(seat: Workstation, time: number, redu
   seat.body.rotation.set(running ? -0.055 : sleep * 0.28 - reach * (1 - lift * 0.6) * 0.06, 0, sleep * 0.13)
   seat.body.position.y = 0.76 + hop + cheer * 0.02
   seat.body.rotation.x += happy ? cheer * 0.08 + relax * 0.1 : reaction * 0.18
-  seat.body.rotation.y = happy ? Math.sin(elapsed * 2.4) * 0.3 * cheer : -reaction * 0.8
+  seat.body.rotation.y = happy ? Math.sin(elapsed * 2.4) * 0.3 * cheer : -reaction * 0.8 * seat.faceTurn
   const headX = -sleep * 0.55 - reach * (1 - lift) * 0.14 + sip * 0.16
   seat.head.rotation.set(
     headX + (happy ? cheer * (0.2 + Math.sin(elapsed * 11) * 0.035) + relax * 0.05 : disappointed ? -reaction * 0.4 : 0),
-    happy ? Math.sin(elapsed * 2.4 + 0.6) * 0.22 * cheer : -reaction * (1.5 + (disappointed ? Math.sin(elapsed * 5) * 0.18 : 0)),
+    happy ? Math.sin(elapsed * 2.4 + 0.6) * 0.22 * cheer : -reaction * (1.5 * seat.faceTurn + (disappointed ? Math.sin(elapsed * 5) * 0.18 : 0)),
     happy ? Math.sin(elapsed * 2.4) * 0.08 * cheer : 0,
   )
   for (const eye of seat.eyes) eye.scale.y = EYE_HEIGHT * (1 - sleep * 0.9 - sip * 0.45) * (happy ? 0.55 : 1)
@@ -230,9 +244,50 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
     }
   }
 
-  // Three desks per row; rows past the fourth push the front of the room out so every desk fits.
-  const rows = Math.ceil(seatCount / 3)
-  const extra = Math.max(0, rows - 4) * 3.05
+  // Static mascots give each zone some life without costing animation frames; front faces local -z.
+  function mascot(kind: 'cat' | 'panda' | 'bunny', x: number, z: number, size = 1, elevation = 0, turn = -2.4): void {
+    const group = new THREE.Group()
+    group.position.set(x, elevation, z)
+    group.rotation.y = turn
+    group.scale.setScalar(size)
+    room.add(group)
+    const fur = kind === 'cat' ? '#f3bb85' : '#fbfaf7'
+    const accent = kind === 'panda' ? '#3b3640' : kind === 'cat' ? '#d98a4e' : '#f4b6c2'
+    mesh(group, sphereGeometry, fur, [0, 0.24, 0], [0.26, 0.24, 0.3])
+    mesh(group, sphereGeometry, fur, [0, 0.56, -0.16], [0.2, 0.18, 0.18])
+    for (const side of [-1, 1]) {
+      if (kind === 'bunny') mesh(group, sphereGeometry, fur, [side * 0.08, 0.86, -0.14], [0.05, 0.17, 0.04]).rotation.z = side * -0.15
+      else mesh(group, sphereGeometry, kind === 'panda' ? accent : fur, [side * 0.13, 0.72, -0.14], [0.06, kind === 'cat' ? 0.08 : 0.055, 0.04])
+      mesh(group, sphereGeometry, kind === 'panda' ? accent : '#2f2824', [side * 0.07, 0.58, -0.32], kind === 'panda' ? [0.05, 0.045, 0.02] : [0.022, 0.026, 0.012])
+      mesh(group, sphereGeometry, '#f4a9b4', [side * 0.12, 0.52, -0.3], [0.03, 0.018, 0.01])
+      if (kind === 'panda') mesh(group, sphereGeometry, accent, [side * 0.17, 0.12, -0.12], [0.09, 0.09, 0.11])
+    }
+    mesh(group, sphereGeometry, accent, [0, 0.52, -0.335], [0.025, 0.018, 0.012])
+    if (kind === 'cat') mesh(group, cylinderGeometry, accent, [0, 0.12, 0.3], [0.04, 0.4, 0.04]).rotation.x = Math.PI / 2.4
+    else mesh(group, sphereGeometry, kind === 'panda' ? accent : fur, [0, 0.16, 0.3], [0.08, 0.08, 0.08])
+  }
+
+  // Themed corners around a central production table, like a cosy illustrated studio. Seats fill in this order;
+  // past the twelve themed places, rows of desks push the front of the room out so every seat fits.
+  interface Station { x: number; z: number; yaw: number; laptop: boolean; desk: boolean; exit: number; aisle: number; triple?: boolean }
+  const themed: Station[] = [
+    ...[0.4, -1.0, 1.8, -2.4, 3.2].map((x) => ({ x, z: -0.6, yaw: Math.PI, laptop: true, desk: false, exit: -0.7, aisle: NORTH })),
+    ...[-7.3, -5.0].map((x) => ({ x, z: -5.4, yaw: 0, laptop: false, desk: true, exit: -0.95, aisle: NORTH, triple: true })),
+    ...[5.0, 7.4].map((x) => ({ x, z: -5.4, yaw: 0, laptop: false, desk: true, exit: -0.95, aisle: NORTH })),
+    ...[-7.3, -5.0].map((x) => ({ x, z: -0.9, yaw: 0, laptop: false, desk: true, exit: -0.95, aisle: SOUTH })),
+    { x: 6.6, z: 4.6, yaw: Math.PI, laptop: true, desk: true, exit: -0.95, aisle: SOUTH },
+  ]
+  const EXTRA_COLUMNS = [-7.4, -5.0, -1.2, 1.4, 6.6]
+  const extraCount = Math.max(0, seatCount - themed.length)
+  const extraRows = Math.ceil(extraCount / EXTRA_COLUMNS.length)
+  const stations = [
+    ...themed.slice(0, seatCount),
+    ...Array.from({ length: extraCount }, (_, index): Station => {
+      const z = 8.9 + Math.floor(index / EXTRA_COLUMNS.length) * 3.05
+      return { x: EXTRA_COLUMNS[index % EXTRA_COLUMNS.length]!, z, yaw: 0, laptop: false, desk: true, exit: -0.95, aisle: z + 1.98 }
+    }),
+  ]
+  const extra = extraRows ? extraRows * 3.05 + 0.6 : 0
   const room = new THREE.Group()
   scene.add(room)
   box(room, palette.edge, 0, -0.22, extra / 2, 18.4, 0.4, 15.4 + extra)
@@ -244,80 +299,111 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
     box(room, i % 2 ? palette.plank : palette.floor, 0, 0.035, z, 18, 0.01, pitch - 0.04)
     for (const offset of [0, 6, 12]) box(room, palette.grout, ((i * 7 + offset) % 18) - 8.5, 0.037, z, 0.025, 0.008, pitch - 0.04)
   }
+  // Each zone gets its own floor: tiles, carpet or a rug.
+  for (const [x, z, w, d, color] of [
+    [-6.3, -5.45, 5.2, 3.7, '#cdbff0'], [-0.1, -5.45, 6.8, 3.7, '#f4b8c8'], [6.2, -5.45, 5.4, 3.7, '#f8c6d3'],
+    [-6.45, -0.6, 4.9, 3.4, '#bfe2cf'], [0.4, -0.45, 7.8, 3.5, '#fde6cf'], [0.4, -0.45, 7.4, 3.1, '#f2c39f'], [6.85, 5.2, 4.1, 4.4, '#c8ccf7'],
+  ] as const) box(room, color, x, 0.042, z, w, 0.012, d)
+  for (let column = 0; column < 7; column++) {
+    for (let row = 0; row < 6; row++) box(room, (column + row) % 2 ? '#dfae93' : '#f8e6d1', -8.5 + column * 0.7, 0.042, 3.3 + row * 0.7, 0.7, 0.012, 0.7)
+  }
 
   box(room, palette.wall, 0, 1.7, -7.45, 18.2, 3.4, 0.18)
-  // Leave a real doorway for departing characters.
-  box(room, palette.wall, -9.05, 1.7, -1.9, 0.18, 3.4, 11.2)
-  box(room, palette.wall, -9.05, 1.7, 6.4, 0.18, 3.4, 2.2)
+  // Leave a real doorway for departing characters at the end of the south corridor.
+  box(room, palette.wall, -9.05, 1.7, -3.1875, 0.18, 3.4, 8.625)
+  box(room, palette.wall, -9.05, 1.7, 5.1375, 0.18, 3.4, 4.725)
   if (extra > 0) box(room, palette.wall, -9.05, 1.7, 7.5 + extra / 2, 0.18, 3.4, extra)
-  box(room, palette.wall, -9.05, 3.15, 4.5, 0.18, 0.5, 1.6)
+  box(room, palette.wall, -9.05, 3.15, SOUTH, 0.18, 0.5, 1.65)
   box(room, palette.trim, 0, 0.17, -7.31, 18, 0.25, 0.1)
-  box(room, palette.trim, -8.92, 0.17, -1.9, 0.1, 0.25, 11.2)
-  box(room, palette.trim, -8.92, 0.17, 6.4, 0.1, 0.25, 2.2)
+  box(room, palette.trim, -8.92, 0.17, -3.1875, 0.1, 0.25, 8.625)
+  box(room, palette.trim, -8.92, 0.17, 5.1375, 0.1, 0.25, 4.725)
   if (extra > 0) box(room, palette.trim, -8.92, 0.17, 7.5 + extra / 2, 0.1, 0.25, extra)
   box(room, palette.cream, 0, 3.43, -7.45, 18.3, 0.1, 0.27)
   box(room, palette.cream, -9.05, 3.43, extra / 2, 0.27, 0.1, 15.2 + extra)
-  // Two-tone walls: a sage wainscot under the warm plaster keeps the room from reading as one flat box.
+  // Two-tone walls: a rose wainscot under the warm plaster keeps the room from reading as one flat box.
   box(room, palette.wainscot, 0, 0.62, -7.3, 18, 0.655, 0.05)
-  box(room, palette.wainscot, -8.9, 0.62, -1.8, 0.05, 0.655, 10.75)
-  box(room, palette.wainscot, -8.9, 0.62, 6.45 + extra / 2, 0.05, 0.655, 1.9 + extra)
+  box(room, palette.wainscot, -8.9, 0.62, -3.1, 0.05, 0.655, 8.15)
+  box(room, palette.wainscot, -8.9, 0.62, 5.1375 + extra / 2, 0.05, 0.655, 4.725 + extra)
   box(room, palette.cream, 0, 0.96, -7.29, 18, 0.05, 0.07)
 
-  for (const x of [-5.2, 0, 5.2]) {
+  for (const x of [-6.15, 1.4]) {
     box(room, palette.trim, x, 2.05, -7.28, 3.7, 2.2, 0.12)
     box(room, palette.glass, x, 2.05, -7.19, 3.42, 1.94, 0.055)
     box(room, palette.sky, x - 0.9, 2.25, -7.15, 1.45, 1.45, 0.025)
+    // Cherry blossom canopy painted across the pane.
+    for (const [dx, dy, r, color] of [[-1.1, 2.75, 0.42, '#f7b9cb'], [-0.4, 2.9, 0.36, '#f9cfdc'], [0.35, 2.7, 0.44, '#f29bb4'], [1.1, 2.85, 0.34, '#f7b9cb'], [-0.75, 2.35, 0.3, '#fbdbe5'], [0.8, 2.35, 0.28, '#f9cfdc']] as const) {
+      mesh(room, sphereGeometry, color, [x + dx, dy, -7.13], [r, r * 0.78, 0.015])
+    }
+    box(room, '#b98b78', x + 0.2, 1.65, -7.135, 0.09, 1.1, 0.01)
     box(room, palette.cream, x, 2.05, -7.11, 0.07, 2, 0.06)
     box(room, palette.cream, x, 2.05, -7.1, 3.45, 0.07, 0.07)
     box(room, palette.oakLight, x, 0.99, -7.08, 3.95, 0.12, 0.42)
   }
 
-  // The door swings outward so the aisle stays clear.
-  for (const z of [3.7, 5.35]) box(room, palette.trim, -8.9, 1.42, z, 0.2, 2.85, 0.12)
-  box(room, palette.trim, -8.9, 2.84, 4.525, 0.2, 0.12, 1.77)
+  // The door swings outward so the corridor stays clear.
+  for (const z of [SOUTH - 0.825, SOUTH + 0.825]) box(room, palette.trim, -8.9, 1.42, z, 0.2, 2.85, 0.12)
+  box(room, palette.trim, -8.9, 2.84, SOUTH, 0.2, 0.12, 1.77)
   const door = new THREE.Group()
-  door.position.set(-8.95, 0, 3.75)
+  door.position.set(-8.95, 0, SOUTH - 0.775)
   room.add(door)
   box(door, palette.oakLight, 0, 1.4, 0.77, 0.09, 2.66, 1.42)
   box(door, palette.glass, 0.07, 1.85, 0.77, 0.03, 1.24, 1.08)
   box(door, palette.dark, 0.13, 1.14, 1.25, 0.08, 0.06, 0.22)
-  box(room, palette.trim, -8.88, 2.04, -2.7, 0.1, 1.8, 4.6)
-  box(room, palette.glass, -8.79, 2.04, -2.7, 0.05, 1.57, 4.35)
-  for (const z of [-4.1, -2.7, -1.3]) box(room, palette.cream, -8.74, 2.04, z, 0.06, 1.62, 0.07)
-  box(room, palette.oakLight, -8.68, 1.1, -2.7, 0.4, 0.1, 4.75)
-  plant(room, -8.4, 2.6, 1.0)
-  plant(room, -8.3, 6.35, 1.05)
-  plant(room, 7.7, -6.2, 1.15)
+  box(room, palette.trim, -8.88, 2.04, -2.4, 0.1, 1.8, 3.0)
+  box(room, palette.glass, -8.79, 2.04, -2.4, 0.05, 1.57, 2.75)
+  for (const z of [-3.4, -2.4, -1.4]) box(room, palette.cream, -8.74, 2.04, z, 0.06, 1.62, 0.07)
+  box(room, palette.oakLight, -8.68, 1.1, -2.4, 0.4, 0.1, 3.15)
 
-  // A quiet lounge occupies its own strip, leaving the full twelve-desk grid open.
-  box(room, palette.rug, 6.65, 0.055, 2.95, 3.55, 0.04, 5.75)
-  for (const x of [5.1, 8.2]) box(room, palette.cream, x, 0.08, 2.95, 0.035, 0.01, 5.3)
-  const sofa = new THREE.Group()
-  sofa.position.set(7.55, 0, 2.55)
-  sofa.rotation.y = -Math.PI / 2
-  sofa.scale.y = 0.62
-  room.add(sofa)
-  box(sofa, palette.sofa, 0, 0.55, -0.2375, 2.65, 0.5, 0.675)
-  box(sofa, palette.sofa, 0, 1.05, -0.47, 2.7, 0.88, 0.25)
-  for (const x of [-1.24, 1.24]) box(sofa, palette.sofa, x, 0.85, 0, 0.24, 0.7, 1.14)
-  for (const x of [-0.8, 0, 0.8]) box(sofa, '#b2beaa', x, 0.85, 0.04, 0.73, 0.16, 0.89)
-  const pillow = box(sofa, '#e0c399', -0.88, 1.18, -0.18, 0.54, 0.53, 0.18)
-  pillow.rotation.z = -0.17
-  // Only the back feet: the front of the seat overhangs so a seated character's lower legs hang free in front.
-  for (const x of [-1, 1]) cylinder(sofa, palette.oak, x, 0.18, -0.35, 0.065, 0.25)
-  cylinder(room, palette.oakLight, 5.4, 0.62, 2.7, 0.66, 0.12)
-  cylinder(room, palette.oak, 5.4, 0.32, 2.7, 0.11, 0.57)
-  cylinder(room, palette.oak, 5.4, 0.065, 2.7, 0.44, 0.09)
-  box(room, palette.cream, 5.25, 0.705, 2.69, 0.48, 0.055, 0.35).rotation.y = 0.17
-  cylinder(room, palette.pot, 5.64, 0.76, 2.59, 0.1, 0.17)
-  plant(room, 7.65, 5.65, 0.9)
+  const glow = new THREE.MeshStandardMaterial({ color: '#fff0cc', emissive: '#ffc470', emissiveIntensity: 1.2, roughness: 0.5 })
+  const ledMaterial = new THREE.MeshStandardMaterial({ color: '#7fd18b', emissive: '#43c463', emissiveIntensity: 0.6, roughness: 0.5 })
+  const blueLed = new THREE.MeshStandardMaterial({ color: '#9cc4ff', emissive: '#5d8dff', emissiveIntensity: 0.9, roughness: 0.5 })
+  const hologram = new THREE.MeshStandardMaterial({ color: '#d3dbff', emissive: '#8c9eff', emissiveIntensity: 0.85, roughness: 0.3 })
+  const ringLight = new THREE.TorusGeometry(0.42, 0.05, 8, 32)
+  materials.add(glow).add(ledMaterial).add(blueLed).add(hologram)
+  geometries.add(ringLight)
+  // Low partitions with planters separate the back corners from the rest area.
+  for (const x of [-3.6, 3.4]) {
+    box(room, palette.cream, x, 0.5, -5.775, 0.16, 1.0, 3.15)
+    box(room, palette.oakLight, x, 1.03, -5.775, 0.22, 0.06, 3.19)
+    for (const z of [-4.6, -6.9]) plant(room, x, z, 0.35, 1.06)
+  }
+  plant(room, -8.45, 7.0, 1.0)
+  plant(room, 8.45, -6.95, 1.1)
+  plant(room, 8.5, 0.6, 1.0)
+  plant(room, 8.5, 7.0, 0.95)
+  plant(room, -2.4, 3.0, 0.8)
+  plant(room, 3.2, 3.0, 0.8)
+  plant(room, -4.1, -2.3, 0.7)
 
+  // Automation corner: a server rack with blinking lights and a robot arm on a pedestal.
+  box(room, palette.dark, -8.55, 1.1, -6.85, 0.6, 2.2, 0.6)
+  for (let i = 0; i < 6; i++) mesh(room, boxGeometry, i % 2 ? blueLed : ledMaterial, [-8.55, 0.4 + i * 0.3, -6.54], [0.42, 0.04, 0.01])
+  cylinder(room, palette.cream, -4.2, 0.45, -6.7, 0.28, 0.9)
+  const robot = new THREE.Group()
+  robot.position.set(-4.2, 0.9, -6.7)
+  robot.rotation.y = 0.6
+  room.add(robot)
+  cylinder(robot, palette.dark, 0, 0.06, 0, 0.2, 0.12)
+  const shoulder = new THREE.Group()
+  shoulder.position.y = 0.12
+  shoulder.rotation.z = -0.35
+  robot.add(shoulder)
+  box(shoulder, '#f4f1f6', 0, 0.35, 0, 0.14, 0.7, 0.14)
+  const elbow = new THREE.Group()
+  elbow.position.y = 0.7
+  elbow.rotation.z = 1.3
+  shoulder.add(elbow)
+  mesh(elbow, sphereGeometry, '#f2a7b8', [0, 0, 0], [0.11, 0.11, 0.11])
+  box(elbow, '#f4f1f6', 0, 0.28, 0, 0.11, 0.56, 0.11)
+  for (const side of [-1, 1]) box(elbow, palette.dark, side * 0.05, 0.62, 0, 0.03, 0.14, 0.06)
+
+  // Rest area: bookshelf and sofa against the back wall, a coffee table and bean bag in front.
   const shelf = new THREE.Group()
-  shelf.position.set(6.25, 0, -5.4)
+  shelf.position.set(-2.0, 0, -6.9)
   room.add(shelf)
   for (const x of [-1.25, 1.25]) box(shelf, palette.oak, x, 1.17, 0, 0.12, 2.34, 0.6)
   for (const y of [0.15, 0.9, 1.65, 2.38]) box(shelf, palette.oakLight, 0, y, 0, 2.65, 0.1, 0.66)
-  const bookColors = ['#7f998b', '#c38e72', '#d2bc8c', '#9d9bb1', '#e7dfc8']
+  const bookColors = ['#c9b3ea', '#f2a7b8', '#f6c49c', '#9fd3c7', '#aac4ef']
   for (let i = 0; i < 14; i++) {
     const row = i % 2
     box(shelf, bookColors[i % bookColors.length]!, -1.06 + Math.floor(i / 2) * 0.22, 0.47 + row * 0.75, 0.02, 0.14, 0.52 - (i % 3) * 0.06, 0.36)
@@ -325,24 +411,69 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
   plant(shelf, 0.78, 0, 0.45, 1.71)
   box(shelf, palette.cream, -0.64, 1.91, 0.08, 0.64, 0.42, 0.43)
   box(shelf, palette.oak, -0.64, 1.95, 0.305, 0.23, 0.045, 0.025)
-  plant(room, 7.6, -2.9, 0.7)
+  const sofa = new THREE.Group()
+  sofa.position.set(1.4, 0, SOFA_SEAT_Z)
+  sofa.scale.y = 0.62
+  room.add(sofa)
+  box(sofa, palette.sofa, 0, 0.55, -0.2375, 2.65, 0.5, 0.675)
+  box(sofa, palette.sofa, 0, 1.05, -0.47, 2.7, 0.88, 0.25)
+  for (const x of [-1.24, 1.24]) box(sofa, palette.sofa, x, 0.85, 0, 0.24, 0.7, 1.14)
+  for (const x of [-0.8, 0, 0.8]) box(sofa, '#f6d2da', x, 0.85, 0.04, 0.73, 0.16, 0.89)
+  box(sofa, '#fff0c4', -0.88, 1.18, -0.18, 0.54, 0.53, 0.18).rotation.z = -0.17
+  box(sofa, '#cdb7ec', 0.92, 1.17, -0.2, 0.5, 0.48, 0.18).rotation.z = 0.15
+  // Only the back feet: the front of the seat overhangs so a seated character's lower legs hang free in front.
+  for (const x of [-1, 1]) cylinder(sofa, palette.oak, x, 0.18, -0.35, 0.065, 0.25)
+  cylinder(room, palette.oakLight, 1.4, 0.62, -4.75, 0.45, 0.1)
+  cylinder(room, palette.oak, 1.4, 0.32, -4.75, 0.08, 0.57)
+  cylinder(room, palette.oak, 1.4, 0.065, -4.75, 0.3, 0.09)
+  cylinder(room, palette.pot, 1.55, 0.74, -4.8, 0.08, 0.14)
+  mesh(room, sphereGeometry, '#cdb7ec', [-0.25, 0.36, -5.1], [0.5, 0.36, 0.48])
+  mascot('panda', -0.25, -5.05, 0.75, 0.55)
+  cylinder(room, '#ffd88a', 2.85, 0.2, -4.5, 0.28, 0.36)
+  cylinder(room, palette.dark, 3.0, 0.03, -6.9, 0.2, 0.05)
+  cylinder(room, palette.dark, 3.0, 0.85, -6.9, 0.025, 1.6)
+  mesh(room, cylinderGeometry, glow, [3.0, 1.78, -6.9], [0.3, 0.36, 0.3])
 
-  const glow = new THREE.MeshStandardMaterial({ color: '#fff0cc', emissive: '#ffc470', emissiveIntensity: 1.2, roughness: 0.5 })
-  materials.add(glow)
-  for (const [x, background, accent, detail] of [[-2.6, '#e6c27a', '#c9785c', '#8fa58a'], [2.6, '#9fb5a4', '#f4e4c8', '#d58f6c']] as const) {
-    box(room, palette.cream, x, 2.1, -7.3, 1.1, 1.5, 0.05)
-    box(room, background, x, 2.1, -7.27, 0.9, 1.3, 0.03)
-    cylinder(room, accent, x, 2.3, -7.24, 0.28, 0.02).rotation.x = Math.PI / 2
-    box(room, detail, x, 1.72, -7.24, 0.64, 0.2, 0.02)
+  // IG studio: a photo wall and a ring light on a tripod.
+  for (let i = 0; i < 10; i++) {
+    const x = 4.1 + (i % 5) * 1.1
+    const y = i < 5 ? 2.95 : 2.3
+    box(room, palette.cream, x, y, -7.3, 0.8, 0.52, 0.04)
+    box(room, ['#f7b9cb', '#aac4ef', '#f6c49c', '#c9b3ea', '#9fd3c7'][(i * 3) % 5]!, x, y, -7.27, 0.66, 0.38, 0.02)
   }
-  cylinder(room, palette.oak, 8.05, 2.5, -7.3, 0.47, 0.05).rotation.x = Math.PI / 2
-  cylinder(room, palette.cream, 8.05, 2.5, -7.27, 0.42, 0.04).rotation.x = Math.PI / 2
-  box(room, palette.dark, 8.05, 2.62, -7.24, 0.03, 0.24, 0.015)
-  box(room, palette.dark, 8.14, 2.5, -7.24, 0.2, 0.03, 0.015)
-  box(room, palette.oak, -8.9, 2.1, 1.6, 0.08, 1.1, 1.8)
-  box(room, '#c9a074', -8.86, 2.1, 1.6, 0.05, 0.96, 1.66)
+  for (let leg = 0; leg < 3; leg++) {
+    const angle = leg * Math.PI * 2 / 3
+    const strut = cylinder(room, palette.dark, 8.45 + Math.cos(angle) * 0.2, 0.4, -4.25 + Math.sin(angle) * 0.2, 0.02, 0.85)
+    strut.rotation.set(Math.sin(angle) * 0.45, 0, -Math.cos(angle) * 0.45)
+  }
+  cylinder(room, palette.dark, 8.45, 1.25, -4.25, 0.025, 1.6)
+  mesh(room, ringLight, glow, [8.45, 2.1, -4.25], [1, 1, 1]).rotation.y = Math.PI / 2
+  box(room, palette.dark, 8.45, 2.1, -4.25, 0.03, 0.26, 0.14)
+
+  // Production table: one long table shared by the seats facing the room, with a camera on a tripod in front.
+  box(room, palette.oakLight, 0.4, 1.02, -0.6, 7.0, 0.13, 1.25)
+  box(room, palette.oak, 0.4, 0.92, -0.6, 6.8, 0.1, 1.05)
+  for (const x of [-2.95, 3.75]) for (const z of [-1.1, -0.1]) box(room, palette.metal, x, 0.5, z, 0.07, 0.96, 0.07)
+  for (const [x, turn] of [[-1.7, 0.2], [-0.3, -0.15], [1.1, 0.3], [2.5, -0.1]] as const) box(room, '#fffdf8', x, 1.09, -0.15, 0.34, 0.01, 0.24).rotation.y = turn
+  box(room, palette.dark, -2.75, 1.13, -0.25, 0.36, 0.06, 0.26)
+  for (let stripe = 0; stripe < 3; stripe++) box(room, palette.cream, -2.87 + stripe * 0.12, 1.165, -0.25, 0.05, 0.01, 0.26)
+  mascot('panda', 2.5, -0.12, 0.42, 1.085)
+  for (let leg = 0; leg < 3; leg++) {
+    const angle = leg * Math.PI * 2 / 3
+    const strut = cylinder(room, palette.dark, -2.3 + Math.cos(angle) * 0.22, 0.55, 1.0 + Math.sin(angle) * 0.22, 0.02, 1.15)
+    strut.rotation.set(Math.sin(angle) * 0.35, 0, -Math.cos(angle) * 0.35)
+  }
+  box(room, palette.dark, -2.3, 1.3, 1.0, 0.36, 0.26, 0.24)
+  cylinder(room, '#2f3a38', -2.3, 1.3, 0.8, 0.09, 0.2).rotation.x = Math.PI / 2
+  mesh(room, sphereGeometry, '#e27b7b', [-2.2, 1.46, 1.05], [0.03, 0.03, 0.03])
+
+  // Finance corner: a filing cabinet beside the desks.
+  box(room, palette.oakLight, -8.55, 0.5, -2.2, 0.55, 1.0, 0.7)
+  for (const y of [0.3, 0.62, 0.9]) box(room, palette.oak, -8.26, y, -2.2, 0.02, 0.04, 0.24)
+  box(room, palette.oak, -8.9, 2.1, -5.0, 0.08, 1.1, 1.8)
+  box(room, '#c9a074', -8.86, 2.1, -5.0, 0.05, 0.96, 1.66)
   for (const [index, color] of ['#f3d36b', '#f0a7a0', '#a9d0bd', '#f3d36b', '#b8c7ec', '#f0a7a0', '#a9d0bd'].entries()) {
-    const note = box(room, color, -8.82, 2.5 - Math.floor(index / 3) * 0.36, 0.95 + (index % 3) * 0.55, 0.02, 0.24, 0.24)
+    const note = box(room, color, -8.82, 2.5 - Math.floor(index / 3) * 0.36, -5.65 + (index % 3) * 0.55, 0.02, 0.24, 0.24)
     note.rotation.x = (index % 2 ? 1 : -1) * (0.05 + index * 0.02)
   }
   // Warm string lights draped along the back wall.
@@ -358,50 +489,65 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
     if (next) box(room, '#4b4a45', (bulb.x + next.x) / 2, (bulb.y + next.y) / 2, bulb.z, Math.hypot(next.x - bulb.x, next.y - bulb.y), 0.012, 0.012)
       .rotation.z = Math.atan2(next.y - bulb.y, next.x - bulb.x)
   }
-  // Lounge extras: floor lamp, bean bag, pouf and a second pillow.
-  cylinder(room, palette.dark, 8.5, 0.03, 0.8, 0.2, 0.05)
-  cylinder(room, palette.dark, 8.5, 0.85, 0.8, 0.025, 1.6)
-  mesh(room, cylinderGeometry, glow, [8.5, 1.78, 0.8], [0.3, 0.36, 0.3])
-  mesh(room, sphereGeometry, '#d79b7d', [6.1, 0.38, 4.6], [0.58, 0.4, 0.55])
-  cylinder(room, '#e3c27a', 5.3, 0.2, 4.35, 0.3, 0.36)
-  const pillowTwo = box(sofa, '#d79b7d', 0.92, 1.17, -0.2, 0.5, 0.48, 0.18)
-  pillowTwo.rotation.z = 0.15
 
-  // Pantry along the left wall: a counter with a coffee machine, and a water dispenser beside it.
-  box(room, palette.oak, -8.55, 0.47, -6.475, 0.62, 0.94, 0.95)
-  box(room, palette.oakLight, -8.55, 0.965, -6.475, 0.66, 0.05, 1.0)
-  for (const z of [-6.75, -6.2]) box(room, palette.dark, -8.235, 0.5, z, 0.012, 0.74, 0.4)
-  box(room, '#dfe8e2', -8.85, 1.4, -6.475, 0.02, 0.55, 1.0)
-  box(room, palette.cream, -8.7, 2.3, -6.475, 0.34, 0.7, 1.15)
-  for (const z of [-6.75, -6.2]) box(room, palette.oak, -8.525, 2.3, z, 0.012, 0.6, 0.5)
-  box(room, palette.dark, -8.62, 1.2, -6.5, 0.32, 0.44, 0.3)
-  box(room, '#2f3a38', -8.62, 1.44, -6.5, 0.28, 0.05, 0.26)
-  box(room, '#2f3a38', -8.4, 1.17, -6.5, 0.14, 0.05, 0.14)
-  box(room, '#c9cec3', -8.38, 0.99, -6.5, 0.2, 0.02, 0.18)
-  const ledMaterial = new THREE.MeshStandardMaterial({ color: '#7fd18b', emissive: '#43c463', emissiveIntensity: 0.6, roughness: 0.5 })
-  materials.add(ledMaterial)
-  mesh(room, sphereGeometry, ledMaterial, [-8.455, 1.34, -6.4], [0.018, 0.018, 0.018])
-  for (const z of [-6.85, -6.78]) cylinder(room, z === -6.85 ? palette.cream : '#e8b7a0', -8.5, 1.03, z, 0.04, 0.08)
-  const coffeeStream = cylinder(room, '#5a3b2a', -8.36, 1.1, -6.5, 0.012, 0.12)
+  // Coffee bar along the left wall: a counter with a coffee machine and a water dispenser, plus a pastry island.
+  const pantry = new THREE.Group()
+  pantry.position.z = PANTRY_SHIFT
+  room.add(pantry)
+  box(pantry, palette.oak, -8.55, 0.47, -6.475, 0.62, 0.94, 0.95)
+  box(pantry, palette.oakLight, -8.55, 0.965, -6.475, 0.66, 0.05, 1.0)
+  for (const z of [-6.75, -6.2]) box(pantry, palette.dark, -8.235, 0.5, z, 0.012, 0.74, 0.4)
+  box(pantry, '#dfe8e2', -8.85, 1.4, -6.475, 0.02, 0.55, 1.0)
+  box(pantry, palette.cream, -8.7, 2.3, -6.475, 0.34, 0.7, 1.15)
+  for (const z of [-6.75, -6.2]) box(pantry, palette.oak, -8.525, 2.3, z, 0.012, 0.6, 0.5)
+  box(pantry, palette.dark, -8.62, 1.2, -6.5, 0.32, 0.44, 0.3)
+  box(pantry, '#2f3a38', -8.62, 1.44, -6.5, 0.28, 0.05, 0.26)
+  box(pantry, '#2f3a38', -8.4, 1.17, -6.5, 0.14, 0.05, 0.14)
+  box(pantry, '#c9cec3', -8.38, 0.99, -6.5, 0.2, 0.02, 0.18)
+  mesh(pantry, sphereGeometry, ledMaterial, [-8.455, 1.34, -6.4], [0.018, 0.018, 0.018])
+  for (const z of [-6.85, -6.78]) cylinder(pantry, z === -6.85 ? palette.cream : '#e8b7a0', -8.5, 1.03, z, 0.04, 0.08)
+  const coffeeStream = cylinder(pantry, '#5a3b2a', -8.36, 1.1, -6.5, 0.012, 0.12)
   coffeeStream.visible = false
-  box(room, '#e9ece8', -8.62, 0.525, -5.62, 0.36, 1.05, 0.36)
-  cylinder(room, '#bfe0ec', -8.62, 1.28, -5.62, 0.15, 0.45)
-  cylinder(room, '#e9ece8', -8.62, 1.52, -5.62, 0.05, 0.04)
-  box(room, '#d9695a', -8.4, 1.12, -5.68, 0.1, 0.04, 0.05)
-  box(room, '#5a8fb0', -8.4, 1.12, -5.56, 0.1, 0.04, 0.05)
-  box(room, '#c9cec3', -8.38, 0.99, -5.62, 0.2, 0.02, 0.2)
-  const waterStream = cylinder(room, '#9fd3ea', -8.36, 1.06, -5.56, 0.01, 0.1)
+  box(pantry, '#e9ece8', -8.62, 0.525, -5.62, 0.36, 1.05, 0.36)
+  cylinder(pantry, '#bfe0ec', -8.62, 1.28, -5.62, 0.15, 0.45)
+  cylinder(pantry, '#e9ece8', -8.62, 1.52, -5.62, 0.05, 0.04)
+  box(pantry, '#d9695a', -8.4, 1.12, -5.68, 0.1, 0.04, 0.05)
+  box(pantry, '#5a8fb0', -8.4, 1.12, -5.56, 0.1, 0.04, 0.05)
+  box(pantry, '#c9cec3', -8.38, 0.99, -5.62, 0.2, 0.02, 0.2)
+  const waterStream = cylinder(pantry, '#9fd3ea', -8.36, 1.06, -5.56, 0.01, 0.1)
   waterStream.visible = false
-
-  const rowShift = (row: number): number => (row % 2 ? 0.45 : -0.45)
-  const rugColors = ['#b9c7a8', '#e2b3a0']
-  for (let row = 0; row < rows; row++) {
-    const z = -4.85 + row * 3.05 + 0.45
-    const columns = Math.min(3, seatCount - row * 3)
-    const x = -5.55 + (columns - 1) * 1.8 + rowShift(row)
-    box(room, palette.cream, x, 0.04, z, columns * 3.6, 0.02, 2.75)
-    box(room, rugColors[row % 2]!, x, 0.043, z, columns * 3.6 - 0.3, 0.02, 2.45)
+  box(room, palette.oak, -5.4, 0.5, 4.8, 1.9, 1.0, 0.75)
+  box(room, palette.oakLight, -5.4, 1.03, 4.8, 2.0, 0.06, 0.85)
+  cylinder(room, palette.glass, -5.85, 1.25, 4.8, 0.3, 0.38)
+  for (const [x, color] of [[-5.95, '#f2a7b8'], [-5.75, '#ffd88a']] as const) cylinder(room, color, x, 1.12, 4.8, 0.08, 0.1)
+  box(room, palette.dark, -4.9, 1.24, 4.8, 0.36, 0.36, 0.3)
+  for (const x of [-5.9, -4.9]) {
+    cylinder(room, palette.dark, x, 0.38, 5.95, 0.03, 0.75)
+    cylinder(room, '#f2a7b8', x, 0.78, 5.95, 0.24, 0.08)
   }
+  mascot('bunny', -7.2, 6.9, 0.8)
+  // Café corner in the middle of the front: a round rug, two tables with stools, a bean bag and big plants.
+  cylinder(room, '#f4c3cf', 0.15, 0.05, 5.3, 2.4, 0.02)
+  cylinder(room, '#fbe0e6', 0.15, 0.052, 5.3, 2.1, 0.02)
+  mesh(room, sphereGeometry, '#ffd88a', [2.9, 0.34, 4.0], [0.48, 0.34, 0.46])
+  plant(room, -2.6, 7.0, 1.25)
+  plant(room, 3.2, 7.0, 1.15)
+  plant(room, 0.2, 7.1, 0.9)
+  for (const [x, z] of [[-1.4, 4.9], [1.6, 5.7]] as const) {
+    cylinder(room, palette.oakLight, x, 0.78, z, 0.55, 0.06)
+    cylinder(room, palette.dark, x, 0.4, z, 0.04, 0.76)
+    cylinder(room, palette.dark, x, 0.03, z, 0.3, 0.05)
+    cylinder(room, palette.cream, x + 0.15, 0.86, z, 0.07, 0.11)
+    for (const side of [-1, 1]) cylinder(room, side < 0 ? '#c9b3ea' : '#9fd3c7', x + side * 0.75, 0.3, z, 0.22, 0.6)
+  }
+
+  // Digital avatar studio: a glowing mirror behind the seat and a pouf with the office cat.
+  box(room, '#f3dca8', 6.35, 1.4, 2.85, 1.4, 2.6, 0.12)
+  mesh(room, boxGeometry, hologram, [6.35, 1.42, 2.92], [1.16, 2.34, 0.02])
+  for (const [x, y] of [[5.6, 2.4], [7.1, 1.9], [5.5, 1.2], [7.2, 2.8]] as const) mesh(room, sphereGeometry, hologram, [x, y, 3.0], [0.05, 0.05, 0.05])
+  cylinder(room, '#cdb7ec', 8.4, 0.18, 5.7, 0.3, 0.36)
+  mascot('cat', 8.4, 5.7, 0.7, 0.36)
+
   const seats: Workstation[] = []
   // Steam: soft puffs rising from a hot mug. The same helper animates desk mugs and the copies characters carry.
   const STEAM_PUFFS = 3
@@ -428,53 +574,81 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       puff.scale.setScalar(0.01 + 0.04 * Math.sin(Math.PI * age))
     })
   }
-  for (let row = 0; row < rows; row++) {
-    for (let column = 0; column < Math.min(3, seatCount - row * 3); column++) {
+  for (const [index, station] of stations.entries()) {
       const group = new THREE.Group()
       group.userData.workstation = true
-      group.position.set(-5.55 + column * 3.6 + rowShift(row), 0, -4.85 + row * 3.05)
+      group.position.set(station.x, 0, station.z)
+      group.rotation.y = station.yaw
       room.add(group)
-      box(group, palette.oakLight, 0, 1.02, 0, 2.35, 0.13, 1.16)
-      box(group, palette.oak, 0, 0.92, -0.4, 2.2, 0.1, 0.08)
-      for (const x of [-0.97, 0.97]) {
-        for (const z of [-0.42, 0.42]) box(group, palette.metal, x, 0.5, z, 0.065, 0.96, 0.065)
-        box(group, palette.metal, x, 0.08, 0, 0.13, 0.08, 1.08)
+      if (station.desk) {
+        box(group, palette.oakLight, 0, 1.02, 0, 2.35, 0.13, 1.16)
+        box(group, palette.oak, 0, 0.92, -0.4, 2.2, 0.1, 0.08)
+        for (const x of [-0.97, 0.97]) {
+          for (const z of [-0.42, 0.42]) box(group, palette.metal, x, 0.5, z, 0.065, 0.96, 0.065)
+          box(group, palette.metal, x, 0.08, 0, 0.13, 0.08, 1.08)
+        }
       }
-      box(group, palette.dark, 0, 1.16, -0.25, 0.43, 0.055, 0.29)
-      box(group, palette.dark, 0, 1.35, -0.35, 0.065, 0.37, 0.065)
-      box(group, palette.dark, 0, 1.65, -0.36, 1.08, 0.67, 0.075)
       const screenMaterial = new THREE.MeshStandardMaterial({ color: palette.screen, emissive: palette.screen, emissiveIntensity: 0.12, roughness: 0.45 })
       materials.add(screenMaterial)
       const screen = new THREE.Mesh(boxGeometry, screenMaterial)
-      screen.position.set(0, 1.65, -0.313)
-      screen.scale.set(0.96, 0.55, 0.012)
-      group.add(screen)
       const activity: THREE.Mesh[] = []
-      for (let line = 0; line < 4; line++) {
-        activity.push(box(group, line % 2 ? '#dcebdd' : '#6d9687', -0.1 + (line % 2) * 0.08, 1.82 - line * 0.11, -0.3, 0.54 - (line % 3) * 0.12, 0.035, 0.012))
+      if (station.laptop) {
+        // A low laptop keeps the face visible for seats that look toward the room.
+        box(group, palette.metal, 0, 1.1, 0.02, 0.78, 0.035, 0.52)
+        const lid = new THREE.Group()
+        lid.position.set(0, 1.1, -0.24)
+        lid.rotation.x = -0.22
+        group.add(lid)
+        box(lid, palette.metal, 0, 0.27, 0, 0.78, 0.52, 0.03)
+        screen.position.set(0, 0.27, 0.017)
+        screen.scale.set(0.7, 0.44, 0.008)
+        lid.add(screen)
+        for (let line = 0; line < 4; line++) {
+          activity.push(box(lid, line % 2 ? '#e8f2ff' : '#6f8fc9', -0.08 + (line % 2) * 0.06, 0.4 - line * 0.08, 0.023, 0.4 - (line % 3) * 0.09, 0.026, 0.006))
+        }
+      } else {
+        box(group, palette.dark, 0, 1.16, -0.25, 0.43, 0.055, 0.29)
+        box(group, palette.dark, 0, 1.35, -0.35, 0.065, 0.37, 0.065)
+        box(group, palette.dark, 0, 1.65, -0.36, 1.08, 0.67, 0.075)
+        screen.position.set(0, 1.65, -0.313)
+        screen.scale.set(0.96, 0.55, 0.012)
+        group.add(screen)
+        for (let line = 0; line < 4; line++) {
+          activity.push(box(group, line % 2 ? '#e8f2ff' : '#6f8fc9', -0.1 + (line % 2) * 0.08, 1.82 - line * 0.11, -0.3, 0.54 - (line % 3) * 0.12, 0.035, 0.012))
+        }
+        box(group, palette.cream, 0, 1.11, 0.25, 0.78, 0.055, 0.27)
+        for (let keyRow = 0; keyRow < 3; keyRow++) {
+          box(group, '#c9cec3', 0, 1.143, 0.17 + keyRow * 0.07, 0.64, 0.01, 0.014)
+        }
+        mesh(group, sphereGeometry, palette.cream, [0.5, 1.12, 0.1], [0.09, 0.035, 0.13])
+        if (index % 2 === 0) box(group, ['#f3d36b', '#f0a7a0', '#a9d0bd'][index % 3]!, 0.47, 1.87, -0.31, 0.11, 0.11, 0.012).rotation.z = 0.12
       }
-      box(group, palette.cream, 0, 1.11, 0.25, 0.78, 0.055, 0.27)
-      for (let keyRow = 0; keyRow < 3; keyRow++) {
-        box(group, '#c9cec3', 0, 1.143, 0.17 + keyRow * 0.07, 0.64, 0.01, 0.014)
-      }
-      mesh(group, sphereGeometry, palette.cream, [0.5, 1.12, 0.1], [0.09, 0.035, 0.13])
-      if ((row + column) % 3 === 0) plant(group, -0.91, -0.27, 0.27, 1.08)
-      const index = row * 3 + column
-      if (index % 3 === 1) {
-        cylinder(group, palette.dark, -0.88, 1.105, -0.2, 0.09, 0.03)
-        cylinder(group, palette.dark, -0.88, 1.29, -0.2, 0.012, 0.35)
-        mesh(group, sphereGeometry, '#e3c27a', [-0.88, 1.5, -0.2], [0.11, 0.07, 0.11])
-      }
-      if (index % 2 === 0) {
-        const note = box(group, ['#f3d36b', '#f0a7a0', '#a9d0bd'][index % 3]!, 0.47, 1.87, -0.31, 0.11, 0.11, 0.012)
-        note.rotation.z = 0.12
-      }
-      if (index % 4 === 2) {
-        box(group, '#c38e72', -0.9, 1.12, 0.1, 0.3, 0.06, 0.22)
-        box(group, '#7f998b', -0.9, 1.175, 0.1, 0.26, 0.05, 0.19).rotation.y = 0.2
+      // Automation desks carry two extra angled screens.
+      if (station.triple) {
+        for (const side of [-1, 1]) {
+          const wing = new THREE.Group()
+          wing.position.set(side * 0.95, 0, -0.25)
+          wing.rotation.y = -side * 0.5
+          group.add(wing)
+          box(wing, palette.dark, 0, 1.3, 0, 0.05, 0.3, 0.05)
+          box(wing, palette.dark, 0, 1.6, 0, 0.7, 0.45, 0.06)
+          box(wing, palette.screen, 0, 1.6, 0.035, 0.63, 0.38, 0.01)
+        }
+      } else if (station.desk) {
+        if (index % 3 === 0) plant(group, -0.91, -0.27, 0.27, 1.08)
+        if (index % 3 === 1) {
+          cylinder(group, palette.dark, -0.88, 1.105, -0.2, 0.09, 0.03)
+          cylinder(group, palette.dark, -0.88, 1.29, -0.2, 0.012, 0.35)
+          mesh(group, sphereGeometry, '#e3c27a', [-0.88, 1.5, -0.2], [0.11, 0.07, 0.11])
+        }
+        if (index % 4 === 2) {
+          box(group, '#c38e72', -0.9, 1.12, 0.1, 0.3, 0.06, 0.22)
+          box(group, '#7f998b', -0.9, 1.175, 0.1, 0.26, 0.05, 0.19).rotation.y = 0.2
+        }
+        box(group, '#dfd7c1', 0.9, 1.115, -0.2, 0.27, 0.06, 0.38).rotation.y = -0.12
       }
       const mugColor = ['#f8f3e9', '#e7b7a0', '#a9c4bf', '#e8cf8a'][index % 4]!
-      const chairColor = ['#828e84', '#c58f6f', '#d3b25f', '#7d9aa6', '#b97d86', '#8f8aa8'][index % 6]!
+      const chairColor = ['#f2a7b8', '#c9b3ea', '#f6c49c', '#9fd3c7', '#f3b0c9', '#aac4ef'][index % 6]!
       const cup = new THREE.Group()
       cup.position.copy(CUP_REST)
       group.add(cup)
@@ -482,7 +656,6 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       cylinder(cup, '#6e5544', 0, 0.121, 0, 0.1, 0.009)
       mesh(cup, cupHandleGeometry, mugColor, [0.13, 0, 0], [1, 1, 1])
       const steam = makeSteam(cup)
-      box(group, '#dfd7c1', 0.9, 1.115, -0.2, 0.27, 0.06, 0.38).rotation.y = -0.12
       cylinder(group, palette.dark, 0, 0.31, 1, 0.055, 0.55)
       for (let leg = 0; leg < 5; leg++) {
         const spoke = box(group, palette.dark, 0, 0.12, 1, 0.8, 0.045, 0.05)
@@ -508,6 +681,8 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       const hood = mesh(body, sphereGeometry, shirt, [0, 0.7, 0.1], [0.2, 0.1, 0.15])
       const head = new THREE.Group()
       head.position.y = 0.82
+      // Slightly oversized heads give the cast a friendly chibi look.
+      head.scale.setScalar(1.15)
       body.add(head)
       mesh(head, sphereGeometry, skin, [0, 0.2, -0.035], [0.235, 0.265, 0.235])
       mesh(head, sphereGeometry, skin, [0, 0.11, -0.065], [0.19, 0.16, 0.19])
@@ -604,19 +779,20 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       ring.position.set(0, 0.08, 1)
       ring.visible = false
       group.add(ring)
-      const selection = box(group, palette.green, 0, 0.055, 0.25, 2.68, 0.015, 2.6)
+      const selection = box(group, palette.green, 0, 0.055, 0.25, station.desk ? 2.68 : 1.35, 0.015, 2.6)
       const selectionMaterial = new THREE.MeshBasicMaterial({ color: palette.green, transparent: true, opacity: 0.15, depthWrite: false })
       materials.add(selectionMaterial)
       selection.material = selectionMaterial
       selection.visible = false
       const seat: Workstation = {
         group, occupant, body, arms, legs, shirt, skin, hair, hairStyles, glasses, hood, restMouth, lookKey: '', screen: screenMaterial, activity, ring, selection,
-        head, eyes, cup, steam, steamUntil: 0, idleOffset: (row * 3 + column) * 10 + row * 0.8, idleActivity: null, away: null,
+        head, eyes, cup, steam, steamUntil: 0, idleOffset: index * 10.27, idleActivity: null, away: null,
         eyebrows, mouth, taskId: null, reactionStartedAt: null, emotionActivity: null,
-        anchor: new THREE.Vector3(group.position.x, 2.5, group.position.z + 0.9), agentId: null, status: 'idle',
+        exit: station.exit, aisle: station.aisle, faceTurn: station.yaw ? 0 : 1,
+        anchor: new THREE.Vector3(), agentId: null, status: 'idle',
       }
+      seat.anchor.copy(restAnchor(seat))
       seats.push(seat)
-    }
   }
   console.assert(seats.length === seatCount, 'The office must contain exactly the requested workstations')
 
@@ -672,12 +848,10 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
   const SIP_ARM_Y = 0.6
   const SIP_TILT = 0.6
   const SIP_SECONDS = 7
-  const PANTRY_STOPS = { coffee: new THREE.Vector3(LANE_X, 0, -6.22), water: new THREE.Vector3(LANE_X, 0, -5.34) }
-  const EAST_X = 4
-  const SHELF_SPOTS = [new THREE.Vector3(5.6, 0, -4.7), new THREE.Vector3(6.9, 0, -4.7)]
-  const SOFA_Z = [1.8, 3.3]
-  const SOFA_FRONT_X = 6.85
-  const SOFA_SEAT_X = 7.55
+  const PANTRY_STOPS = { coffee: new THREE.Vector3(LANE_X, 0, -6.22 + PANTRY_SHIFT), water: new THREE.Vector3(LANE_X, 0, -5.34 + PANTRY_SHIFT) }
+  const SHELF_SPOTS = [new THREE.Vector3(-2.65, 0, -6.2), new THREE.Vector3(-1.35, 0, -6.2)]
+  const SOFA_X = [0.65, 2.15]
+  const SOFA_FRONT_Z = SOFA_SEAT_Z + 0.7
   const SOFA_DROP = 0.14
   const SOFA = { turn: 0.5, sit: 0.9, stand: 0.9 }
   const WALK_SPEED = 2.1
@@ -688,6 +862,37 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
   const CAPACITY: Record<Destination, number> = { coffee: 1, water: 1, shelf: 2, sofa: 2 }
   const AWAY_ACTIVITY = { coffee: 'pantry', water: 'pantry', shelf: 'books', sofa: 'sofa' } as const
   const DESTINATIONS: Destination[] = ['coffee', 'water', 'shelf', 'shelf', 'sofa', 'sofa']
+
+  /** World position of a point in a seat's own frame, where the occupant faces local -z. */
+  function seatPoint(seat: Workstation, x: number, z: number, y = 0): THREE.Vector3 {
+    const { position, rotation } = seat.group
+    const cos = Math.cos(rotation.y)
+    const sin = Math.sin(rotation.y)
+    return new THREE.Vector3(position.x + x * cos + z * sin, y, position.z - x * sin + z * cos)
+  }
+
+  function restAnchor(seat: Workstation): THREE.Vector3 {
+    return seatPoint(seat, 0, 0.9, 2.5)
+  }
+
+  // Out past the chair, then straight onto the seat's corridor.
+  function leaveSeat(seat: Workstation): THREE.Vector3[] {
+    const side = seatPoint(seat, seat.exit, 0.93)
+    return [side, new THREE.Vector3(side.x, 0, seat.aisle)]
+  }
+
+  // Corridors run along x; the two connectors are the only crossings between them.
+  function corridorPath(fromX: number, fromZ: number, toX: number, toZ: number): THREE.Vector3[] {
+    if (fromZ === toZ) return [new THREE.Vector3(toX, 0, toZ)]
+    const cost = (x: number): number => Math.abs(fromX - x) + Math.abs(x - toX)
+    const crossing = CONNECTORS.reduce((best, x) => (cost(x) < cost(best) ? x : best))
+    return [new THREE.Vector3(crossing, 0, fromZ), new THREE.Vector3(crossing, 0, toZ), new THREE.Vector3(toX, 0, toZ)]
+  }
+
+  function routeFrom(seat: Workstation, toX: number, toZ: number): THREE.Vector3[] {
+    const out = leaveSeat(seat)
+    return [...out, ...corridorPath(out[1]!.x, seat.aisle, toX, toZ)]
+  }
 
   function turnToward(from: number, to: number, delta: number): number {
     const difference = ((to - from + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI
@@ -712,9 +917,8 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
     const root = seat.occupant.clone(true)
     root.visible = true
     root.name = name
-    root.position.copy(seat.group.position)
     const body = root.children[0] as THREE.Group
-    root.position.z += body.position.z
+    root.position.copy(seatPoint(seat, 0, body.position.z))
     body.position.z = 0
     const arms = seat.arms.map((arm) => body.children[seat.body.children.indexOf(arm)] as THREE.Group)
     const legs = seat.legs.map((leg) => body.children[seat.body.children.indexOf(leg)] as THREE.Group)
@@ -724,23 +928,15 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       if (object instanceof THREE.Mesh && owned.has(object.material)) object.material = owned.get(object.material)!
     })
     body.scale.setScalar(1)
-    body.rotation.set(0, 0, 0)
+    body.rotation.set(0, seat.group.rotation.y, 0)
     return { root, body, head: body.children[seat.body.children.indexOf(seat.head)] as THREE.Group, arms, legs, owned: [...owned.values()] }
   }
 
   function depart(seat: Workstation): void {
     const figure = cloneFigure(seat, 'departing-agent')
-    const x = seat.group.position.x
-    const z = seat.group.position.z
     departures.add({
       ...figure, waypoint: 0, elapsed: 0,
-      route: [
-        new THREE.Vector3(x - 0.95, 0, z + 0.93),
-        new THREE.Vector3(x - 0.95, 0, z + 1.98),
-        new THREE.Vector3(-7.45, 0, z + 1.98),
-        new THREE.Vector3(-7.45, 0, 4.55),
-        new THREE.Vector3(-9.7, 0, 4.55),
-      ],
+      route: [...routeFrom(seat, LANE_X, SOUTH), new THREE.Vector3(-9.7, 0, SOUTH)],
     })
     room.add(figure.root)
   }
@@ -778,19 +974,12 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
     prop.name = 'carried-prop'
     figure.arms[1]!.add(prop)
     taken.set(`${dest}:${slot}`, seat)
-    const x = seat.group.position.x
-    const z = seat.group.position.z
-    const aisle = z + 1.98
-    const targets = [new THREE.Vector3(x - 0.95, 0, z + 0.93), new THREE.Vector3(x - 0.95, 0, aisle)]
-    if (dest === 'coffee' || dest === 'water') targets.push(new THREE.Vector3(LANE_X, 0, aisle), PANTRY_STOPS[dest].clone())
-    else {
-      targets.push(new THREE.Vector3(EAST_X, 0, aisle))
-      if (dest === 'shelf') targets.push(new THREE.Vector3(EAST_X, 0, SHELF_SPOTS[slot]!.z), SHELF_SPOTS[slot]!.clone())
-      else targets.push(new THREE.Vector3(EAST_X, 0, 1), new THREE.Vector3(6.55, 0, 1), new THREE.Vector3(SOFA_FRONT_X, 0, SOFA_Z[slot]!))
-    }
+    const targets = dest === 'coffee' || dest === 'water' ? [...routeFrom(seat, LANE_X, SOUTH), PANTRY_STOPS[dest].clone()]
+      : dest === 'shelf' ? [...routeFrom(seat, SHELF_SPOTS[slot]!.x, NORTH), SHELF_SPOTS[slot]!.clone()]
+        : [...routeFrom(seat, SOFA_X[slot]!, NORTH), new THREE.Vector3(SOFA_X[slot]!, 0, SOFA_FRONT_Z)]
     walkers.set(seat, {
       ...figure, seat, dest, slot, rest: 10 + Math.random() * 6, phase: 'out', clock: 0, phaseStart: 0, prop,
-      startedTask: seat.taskId, hurry: false, visited: [new THREE.Vector3(x, 0, z + 0.93)], targets,
+      startedTask: seat.taskId, hurry: false, visited: [seatPoint(seat, 0, 0.93)], targets,
     })
     seat.occupant.visible = false
     seat.away = AWAY_ACTIVITY[dest]
@@ -811,7 +1000,7 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
     seat.away = null
     seat.cup.visible = true
     seat.occupant.visible = Boolean(seat.agentId)
-    seat.anchor.set(seat.group.position.x, 2.5, seat.group.position.z + 0.9)
+    seat.anchor.copy(restAnchor(seat))
     nextWalk.set(seat, movementClock + 45 + Math.random() * 45)
   }
 
@@ -898,7 +1087,7 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       let stand = 1
       let stride = 0
       let lift = 0
-      let rootX: number | undefined
+      let rootZ: number | undefined
       let armRight: number | undefined
       let armLeft: number | undefined
       let headX = 0
@@ -960,10 +1149,10 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
           walker.prop.visible = u > 1.3 && u < 7.1
         } else {
           // Turn around, back up to the cushion and sit down; later stand up the same way. Seated, sip the coffee now and then.
-          walker.body.rotation.y = turnToward(walker.body.rotation.y, Math.PI / 2, delta)
+          walker.body.rotation.y = turnToward(walker.body.rotation.y, Math.PI, delta)
           const seated = sofaSeated(walker, time)
           stand = 1 - seated
-          rootX = SOFA_FRONT_X + (SOFA_SEAT_X - SOFA_FRONT_X) * seated
+          rootZ = SOFA_FRONT_Z + (SOFA_SEAT_Z - SOFA_FRONT_Z) * seated
           lift = -SOFA_DROP * seated
           armLeft = -0.5 - 0.15 * stand
           const cycle = Math.max(0, time - SOFA.turn - SOFA.sit) % SIP_SECONDS
@@ -984,7 +1173,7 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       }
       if (walker.phase === 'sit') {
         // Face the desk, then lower onto the chair; a carried mug is set down on the desk first.
-        walker.body.rotation.y = turnToward(walker.body.rotation.y, 0, delta)
+        walker.body.rotation.y = turnToward(walker.body.rotation.y, seat.group.rotation.y, delta)
         stand = 1 - smoothstep(time, 0.3, 0.9)
         if (carrying && time >= 0.35) setDownMug(walker)
         if (time >= 0.9) {
@@ -999,7 +1188,7 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
       if (armLeft !== undefined) walker.arms[0]!.rotation.x = armLeft
       walker.head.rotation.set(headX, headY, 0)
       walker.root.position.y = lift
-      if (rootX !== undefined) walker.root.position.x = rootX
+      if (rootZ !== undefined) walker.root.position.z = rootZ
       walker.prop.quaternion.copy(walker.arms[1]!.quaternion).invert()
       if (walker.dest === 'shelf') walker.prop.quaternion.multiply(BOOK_TILT)
       else if (mugTilt) walker.prop.quaternion.multiply(tilt.setFromAxisAngle(AXIS_X, mugTilt))
@@ -1015,6 +1204,15 @@ export function createOffice(scene: THREE.Scene, seatCount = DEFAULT_SEATS): Off
   return {
     seats,
     bounds: { minZ: -7.5, maxZ: 7.5 + extra },
+    zones: [
+      { label: 'Otomasi', anchor: new THREE.Vector3(-6.2, 3.2, -6.9) },
+      { label: 'Area santai', anchor: new THREE.Vector3(0.4, 3.3, -7.0) },
+      { label: 'Studio IG', anchor: new THREE.Vector3(6.3, 3.4, -7.0) },
+      { label: 'Produksi AI', anchor: new THREE.Vector3(-3.0, 1.9, -0.6) },
+      { label: 'Keuangan', anchor: new THREE.Vector3(-8.4, 2.9, -2.2) },
+      { label: 'Coffee bar', anchor: new THREE.Vector3(-5.4, 2.0, 4.8) },
+      { label: 'Avatar digital', anchor: new THREE.Vector3(6.35, 3.0, 2.85) },
+    ],
     setAgent(seat, agent): void {
       if (seat.away && seat.agentId !== (agent?.id ?? null)) endWalk(walkers.get(seat)!)
       if (!agent && seat.agentId) depart(seat)
@@ -1092,7 +1290,7 @@ export function updateWorkstationStatus(seat: Workstation, status: Workstation['
   seat.selection.visible = selected
   seat.ring.material.color.set(palette[status])
   seat.ring.material.emissive.set(palette[status])
-  seat.screen.color.set(seat.agentId ? '#a8c6b6' : '#c7d4cb')
+  seat.screen.color.set(seat.agentId ? '#a9cdf2' : '#d7dbe6')
   seat.screen.emissiveIntensity = status === 'running' ? 0.35 : 0.08
   seat.activity.forEach((line) => { line.visible = Boolean(seat.agentId) })
 }

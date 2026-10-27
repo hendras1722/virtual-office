@@ -38,6 +38,13 @@ const visibleAgents = computed(() => props.agents.slice(0, props.seats).map((age
     : '',
   needsPermission: statuses.value.get(agent.id)?.status === 'running' && !!statuses.value.get(agent.id)?.permission,
 })))
+const counts = computed(() => {
+  const waiting = visibleAgents.value.filter((agent) => agent.needsPermission).length
+  const working = visibleAgents.value.filter((agent) => agent.status === 'running').length - waiting
+  return { working, waiting, idle: visibleAgents.value.length - working - waiting }
+})
+const zones = shallowRef<OfficeModel['zones']>([])
+const zoneLabels: HTMLElement[] = []
 
 let renderer: THREE.WebGLRenderer | undefined
 let scene: THREE.Scene | undefined
@@ -65,6 +72,17 @@ let pointerMoved = false
 function bindLabel(id: string, element: Element | ComponentPublicInstance | null): void {
   if (element instanceof HTMLElement) labels.set(id, element)
   else labels.delete(id)
+}
+
+function bindZone(index: number, element: Element | ComponentPublicInstance | null): void {
+  if (element instanceof HTMLElement) zoneLabels[index] = element
+}
+
+function placeLabel(label: HTMLElement, anchor: THREE.Vector3, view: THREE.Camera): void {
+  projection.copy(anchor).project(view)
+  const visible = projection.z > -1 && projection.z < 1 && Math.abs(projection.x) < 1.12 && Math.abs(projection.y) < 1.12
+  label.style.visibility = visible ? 'visible' : 'hidden'
+  label.style.transform = `translate(${(projection.x * 0.5 + 0.5) * width}px, ${(-projection.y * 0.5 + 0.5) * height}px) translate(-50%, -100%)`
 }
 
 function scheduleRender(): void {
@@ -96,11 +114,12 @@ function render(time: number): void {
       const activity = label.lastElementChild
       const text = seat.emotionActivity === 'happy' ? 'Senang!' : seat.emotionActivity === 'disappointed' ? 'Kecewa' : seat.idleActivity === 'sleeping' ? 'Zzz · Tidur' : seat.idleActivity === 'tea' ? 'Minum teh' : seat.idleActivity === 'pantry' ? 'Ke pantry' : seat.idleActivity === 'books' ? 'Baca buku' : seat.idleActivity === 'sofa' ? 'Santai di sofa' : ''
       if (activity && activity.textContent !== text) activity.textContent = text
-      projection.copy(seat.anchor).project(camera)
-      const visible = projection.z > -1 && projection.z < 1 && Math.abs(projection.x) < 1.12 && Math.abs(projection.y) < 1.12
-      label.style.visibility = visible ? 'visible' : 'hidden'
-      label.style.transform = `translate(${(projection.x * 0.5 + 0.5) * width}px, ${(-projection.y * 0.5 + 0.5) * height}px) translate(-50%, -100%)`
+      placeLabel(label, seat.anchor, camera)
     }
+  }
+  for (const [index, zone] of zones.value.entries()) {
+    const label = zoneLabels[index]
+    if (label) placeLabel(label, zone.anchor, camera)
   }
   if (shadowsMoving || shadowsWereMoving) renderer.shadowMap.needsUpdate = true
   renderer.render(scene, camera)
@@ -174,7 +193,7 @@ function resetCamera(): void {
   controls.enableDamping = false
   controls.update()
   const centerZ = office ? (office.bounds.minZ + office.bounds.maxZ) / 2 : 0
-  camera.position.set(21, 25, 28 + centerZ)
+  camera.position.set(11, 27, 30 + centerZ)
   controls.target.set(0, 0.7, centerZ)
   camera.zoom = 1
   camera.lookAt(controls.target)
@@ -207,6 +226,7 @@ function buildOffice(): void {
   office?.dispose()
   occupied.clear()
   office = createOffice(scene, props.seats)
+  zones.value = office.zones
   office.seats.forEach((seat) => updateWorkstationStatus(seat, 'idle', false, null))
   if (sun) {
     const extra = office.bounds.maxZ - 7.5
@@ -404,7 +424,7 @@ onMounted(() => {
     renderer.shadowMap.needsUpdate = true
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.35
+    renderer.toneMappingExposure = 1.05
     renderer.setClearColor('#f2f0e9', 0)
     const canvas = renderer.domElement
     canvas.className = 'office-canvas'
@@ -414,8 +434,8 @@ onMounted(() => {
     host.value.prepend(canvas)
     scene = new THREE.Scene()
     camera = new THREE.OrthographicCamera(-15, 15, 12, -12, 0.1, 150)
-    scene.add(new THREE.HemisphereLight('#fff1dc', '#c4ad8a', 2.3))
-    sun = new THREE.DirectionalLight('#ffdfae', 4.3)
+    scene.add(new THREE.HemisphereLight('#fff3ef', '#d9b9c4', 2.3))
+    sun = new THREE.DirectionalLight('#ffe4c4', 4.3)
     sun.position.set(-5, 16, 8)
     sun.castShadow = true
     sun.shadow.mapSize.set(1024, 1024)
@@ -429,7 +449,7 @@ onMounted(() => {
     sun.shadow.bias = -0.0002
     sun.shadow.radius = 4
     scene.add(sun, sun.target)
-    const fill = new THREE.DirectionalLight('#d8e4f0', 1.1)
+    const fill = new THREE.DirectionalLight('#e4dcf5', 1.1)
     fill.position.set(9, 8, -9)
     scene.add(fill)
     buildOffice()
@@ -492,6 +512,7 @@ onBeforeUnmount(disposeScene)
         </g>
       </svg>
       <div class="agent-labels">
+        <span v-for="(zone, index) in zones" :key="zone.label" :ref="(element) => bindZone(index, element)" class="zone-label" aria-hidden="true">{{ zone.label }}</span>
         <button
           v-for="agent in visibleAgents"
           :key="agent.id"
@@ -506,10 +527,16 @@ onBeforeUnmount(disposeScene)
           @click="emit('select', agent.id)"
         >
           <span class="label-dot" aria-hidden="true">{{ agent.needsPermission ? '!' : agent.status === 'completed' ? '✓' : agent.status === 'failed' ? '!' : '' }}</span>
-          <span class="label-name"><span v-if="agent.needsPermission" class="permission-caption">Minta izin</span>{{ agent.action || agent.name }}</span>
+          <span class="label-name"><span v-if="agent.needsPermission" class="permission-caption">Minta izin</span>{{ agent.needsPermission ? agent.action : agent.name }}</span>
           <span v-if="agent.status === 'running' && !agent.needsPermission" class="typing-dots" aria-hidden="true">···</span>
           <span class="idle-action" aria-hidden="true"></span>
         </button>
+      </div>
+      <div v-if="visibleAgents.length" class="office-hud">
+        <span class="hud-live"><i aria-hidden="true" />Live</span>
+        <span>Bekerja <b>{{ counts.working }}</b></span>
+        <span>Idle <b>{{ counts.idle }}</b></span>
+        <span class="hud-waiting" :class="{ active: counts.waiting }">Tunggu izin <b>{{ counts.waiting }}</b></span>
       </div>
       <div class="camera-controls" role="group" aria-label="Kontrol kamera kantor">
         <button type="button" class="camera-button" aria-label="Perbesar kantor" title="Perbesar" @click="zoomCamera(1.2)">+</button>
@@ -530,7 +557,7 @@ onBeforeUnmount(disposeScene)
 </template>
 
 <style scoped>
-.office-scene { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 42%, #f8f6ef 0%, #f0eee6 68%, #e9e9df 100%); }
+.office-scene { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 40%, #fff8f4 0%, #f8eaf0 62%, #efe0ec 100%); }
 .office-scene :deep(.office-canvas) { display: block; width: 100%; height: 100%; touch-action: none; outline-offset: -4px; }
 .office-scene :deep(.office-canvas:focus-visible) { outline: 2px solid var(--accent, #54745c); }
 .office-scene.has-whip :deep(.office-canvas), .office-scene.has-whip .agent-label { cursor: none; }
@@ -542,24 +569,32 @@ onBeforeUnmount(disposeScene)
 .whip-wrap { stroke: var(--surface); }
 .whip-snap { opacity: 0; }
 .agent-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.agent-label { position: absolute; top: 0; left: 0; visibility: hidden; display: flex; align-items: center; gap: 6px; max-width: 150px; min-height: 28px; padding: 5px 9px 5px 7px; border: 1px solid #ffffffc9; border-radius: 7px; background: #fffffff0; color: #4a5149; font-family: inherit; font-weight: 600; font-size: 10px; line-height: 1.3; box-shadow: 0 2px 8px #35433413, 0 1px 2px #3543340a; pointer-events: auto; cursor: pointer; white-space: nowrap; transition: box-shadow 150ms, background 150ms; }
-.agent-label:hover, .agent-label.is-selected { z-index: 2; background: #fff; border-color: #8fa68e; box-shadow: 0 0 0 2px #a6b99b40, 0 3px 10px #35433418; }
-.agent-label:focus-visible, .camera-button:focus-visible { outline: 2px solid var(--accent, #54745c); outline-offset: 3px; }
+.zone-label { position: absolute; top: 0; left: 0; visibility: hidden; padding: 4px 11px; border: 1.5px solid #f3dde6; border-radius: 9px; background: #fffffff2; color: #4b3f5c; font-size: 11px; font-weight: 800; letter-spacing: .2px; white-space: nowrap; box-shadow: 0 3px 10px #7a4d6a1f; }
+.agent-label { position: absolute; top: 0; left: 0; visibility: hidden; display: flex; align-items: center; gap: 6px; max-width: 160px; min-height: 26px; padding: 4px 11px 4px 5px; border: 1.5px solid #fff; border-radius: 999px; background: #fffffff5; color: #3d3550; font-family: inherit; font-weight: 700; font-size: 11px; line-height: 1.3; box-shadow: 0 4px 12px #6b4b6a26, 0 1px 2px #6b4b6a14; pointer-events: auto; cursor: pointer; white-space: nowrap; transition: box-shadow 150ms, border-color 150ms; }
+.agent-label:hover, .agent-label.is-selected { z-index: 2; background: #fff; border-color: #c9b3ea; box-shadow: 0 0 0 3px #c9b3ea59, 0 5px 14px #6b4b6a2e; }
+.agent-label:focus-visible, .camera-button:focus-visible { outline: 2px solid #8a6fc4; outline-offset: 3px; }
 .label-name { overflow: hidden; text-overflow: ellipsis; }
-.agent-label.needs-permission { max-width: 200px; white-space: normal; border-color: var(--amber); background: var(--amber-soft); color: var(--text); box-shadow: 0 0 0 2px var(--surface); z-index: 1; cursor: pointer; }
-.needs-permission .label-dot { background: var(--amber); box-shadow: none; }
+.agent-label.needs-permission { max-width: 220px; padding: 6px 12px 6px 7px; white-space: normal; border: 2px solid #e6b54a; border-radius: 14px; background: linear-gradient(#fffbf1, #fff1d6); color: #4a3a1f; box-shadow: 0 0 0 3px #fff, 0 6px 16px #b7862b33; z-index: 1; cursor: pointer; }
+.agent-label.needs-permission::after { content: ''; position: absolute; left: 50%; bottom: -7px; width: 10px; height: 10px; border: solid #e6b54a; border-width: 0 2px 2px 0; background: #fff1d6; transform: translateX(-50%) rotate(45deg); }
+.agent-label.needs-permission .label-dot { width: 16px; height: 16px; background: #e6b54a; box-shadow: none; font-size: 10px; animation: none; }
 .needs-permission .label-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.permission-caption { display: block; color: var(--amber); font-size: 9px; text-transform: uppercase; letter-spacing: .6px; }
-.label-dot { flex: 0 0 auto; display: grid; place-items: center; width: 10px; height: 10px; border-radius: 50%; background: var(--agent-color, #9bad99); color: #fff; font-size: 8px; }
-.status-running .label-dot { background: #d59c51; box-shadow: 0 0 0 3px #d59c511a; }
-.status-completed .label-dot { background: #648e6c; }
-.status-failed .label-dot { background: #c57261; }
-.typing-dots { color: #b38344; font-size: 16px; line-height: 8px; letter-spacing: 1px; }
-.idle-action { flex-shrink: 0; font-size: 10px; font-weight: 700; color: var(--green, #54745c); }.idle-action:empty { display: none; }
-.camera-controls { position: absolute; right: 24px; bottom: 20px; display: flex; align-items: center; gap: 2px; padding: 5px; border: 1px solid #e0e2d8; border-radius: 10px; background: #fffdf7ed; box-shadow: 0 3px 14px #3d4a3a09; }
-.camera-button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #65735f; font: 400 22px/1 sans-serif; cursor: pointer; }
-.camera-button:hover { background: #e9ede1; color: #3a543f; }
-.control-divider { width: 1px; height: 17px; margin: 0 3px; background: #e0e3d9; }
+.permission-caption { display: block; color: #b7862b; font-size: 9px; text-transform: uppercase; letter-spacing: .6px; }
+.label-dot { flex: 0 0 auto; display: grid; place-items: center; width: 12px; height: 12px; border-radius: 50%; background: #b7b1c2; color: #fff; font-size: 8px; box-shadow: 0 0 0 2px #fff, 0 0 0 3px #b7b1c255; }
+.status-running .label-dot { background: #3fb67a; box-shadow: 0 0 0 2px #fff, 0 0 0 3px #3fb67a66; animation: label-pulse 1.6s ease-in-out infinite; }
+.status-completed .label-dot { background: #6fa4dc; }
+.status-failed .label-dot { background: #e27b7b; }
+@keyframes label-pulse { 50% { box-shadow: 0 0 0 2px #fff, 0 0 0 6px #3fb67a22; } }
+.typing-dots { color: #3fb67a; font-size: 16px; line-height: 8px; letter-spacing: 1px; }
+.idle-action { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #8a6fc4; }.idle-action:empty { display: none; }
+.office-hud { position: absolute; left: 16px; bottom: 18px; display: flex; align-items: center; gap: 12px; padding: 7px 14px; border: 1.5px solid #fff; border-radius: 999px; background: #fffffff2; color: #4a4257; font-size: 11px; font-weight: 600; white-space: nowrap; box-shadow: 0 4px 14px #6b4b6a1f; pointer-events: none; }
+.office-hud b { font-weight: 800; color: #2f2840; }
+.hud-live { display: flex; align-items: center; gap: 6px; font-weight: 800; }
+.hud-live i { width: 8px; height: 8px; border-radius: 50%; background: #ef5a6f; box-shadow: 0 0 0 3px #ef5a6f2e; }
+.hud-waiting.active { margin: -3px -8px -3px 0; padding: 3px 9px; border-radius: 999px; background: #fff1d6; color: #8a6520; }
+.camera-controls { position: absolute; right: 24px; bottom: 20px; display: flex; align-items: center; gap: 2px; padding: 5px; border: 1.5px solid #fff; border-radius: 999px; background: #fffffff2; box-shadow: 0 4px 14px #6b4b6a1f; }
+.camera-button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #6b5a7a; font: 400 22px/1 sans-serif; cursor: pointer; }
+.camera-button:hover { background: #f6ecf3; color: #4b3f5c; }
+.control-divider { width: 1px; height: 17px; margin: 0 3px; background: #eedfe8; }
 .webgl-error { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; padding: 35px; color: #596951; text-align: center; }
 .error-symbol { font-size: 48px; color: #92a387; }
 .webgl-error > strong { font-size: 18px; }
@@ -567,11 +602,13 @@ onBeforeUnmount(disposeScene)
 .webgl-error > .error-note { color: #8a9282; font-size: 11px; }
 @media (max-width: 640px) {
   .camera-controls { right: 14px; bottom: 14px; }
-  .agent-label { max-width: 110px; min-height: 26px; font-size: 9px; padding: 4px 6px; gap: 4px; }
+  .office-hud { top: 10px; bottom: auto; left: 10px; gap: 9px; padding: 5px 11px; font-size: 10px; }
+  .zone-label { padding: 3px 8px; font-size: 9px; }
+  .agent-label { max-width: 110px; min-height: 24px; font-size: 9px; padding: 3px 7px 3px 4px; gap: 4px; }
   .agent-label.needs-permission { max-width: 145px; }
   .needs-permission:not(.is-selected):not(:focus-visible) { justify-content: center; min-width: 26px; }
   .needs-permission:not(.is-selected):not(:focus-visible) .label-name { display: none; }
   .agent-label:not(.is-selected):not(.needs-permission):not(:focus-visible) { opacity: 0; pointer-events: none; }
 }
-@media (prefers-reduced-motion: reduce) { .agent-label { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .agent-label { transition: none; } .status-running .label-dot { animation: none; } }
 </style>
